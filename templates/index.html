@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gastrointestinal Disease Detection</title>
+  <!-- Tailwind via CDN: fine for a project/demo, no build step needed -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-800">
+  <main class="mx-auto max-w-2xl px-4 py-10">
+
+    <header class="mb-8 text-center">
+      <h1 class="text-2xl font-semibold sm:text-3xl">Gastrointestinal Disease Detection</h1>
+      <p class="mt-2 text-slate-500">Upload an endoscopic image to get a prediction.</p>
+    </header>
+
+    <!-- Upload card -->
+    <section class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+      <label id="dropzone" for="file-input"
+             class="flex min-h-56 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-slate-300 p-4 text-center transition hover:border-indigo-400 hover:bg-indigo-50/50">
+        <img id="preview" class="hidden max-h-64 rounded-lg object-contain" alt="Image preview">
+        <div id="placeholder">
+          <p class="font-medium">Drag an image here</p>
+          <p class="text-sm text-slate-500">or click to choose a file (JPG, PNG)</p>
+        </div>
+      </label>
+      <input id="file-input" type="file" accept="image/*" class="hidden">
+
+      <button id="analyze-btn" disabled
+              class="mt-5 w-full rounded-xl bg-indigo-600 px-4 py-3 font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+        Analyze
+      </button>
+
+      <p id="error" class="mt-3 hidden rounded-lg bg-red-50 p-3 text-sm text-red-700"></p>
+    </section>
+
+    <!-- Results card -->
+    <section id="results" class="mt-6 hidden rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+      <p class="text-sm uppercase tracking-wide text-slate-500">Predicted diagnosis</p>
+      <h2 id="top-label" class="mt-1 text-2xl font-semibold"></h2>
+      <p id="top-confidence" class="text-slate-500"></p>
+      <p id="low-confidence" class="mt-3 hidden rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+        Low confidence: this result is not very reliable.
+      </p>
+      <ul id="bars" class="mt-5 space-y-1"></ul>
+      <p class="mt-3 text-xs text-slate-500">Click a class to display its Grad-CAM.</p>
+
+      <!-- Grad-CAM (hidden if the server returns no heatmap) -->
+      <div id="gradcam" class="mt-8 hidden border-t border-slate-200 pt-6">
+        <h3 id="cam-title" class="font-medium">Grad-CAM</h3>
+        <div class="mt-4 grid gap-4 sm:grid-cols-2">
+          <figure>
+            <img id="cam-original" class="w-full rounded-lg" alt="Original image">
+            <figcaption class="mt-1 text-center text-xs text-slate-500">Original image</figcaption>
+          </figure>
+          <figure>
+            <div class="relative overflow-hidden rounded-lg">
+              <img id="cam-base" class="block w-full" alt="Original image">
+              <img id="cam-overlay" class="absolute inset-0 h-full w-full" style="opacity:0.6" alt="Grad-CAM heatmap">
+            </div>
+            <figcaption class="mt-1 text-center text-xs text-slate-500">Grad-CAM overlay</figcaption>
+          </figure>
+        </div>
+        <div class="mt-4 flex items-center gap-3 text-sm text-slate-500">
+          <label for="cam-opacity">Intensity</label>
+          <input id="cam-opacity" type="range" min="0" max="100" value="60" class="flex-1">
+        </div>
+        <div class="mt-3">
+          <div class="h-2 rounded-full" style="background:linear-gradient(to right,#00008f,#0000ff,#00ffff,#ffff00,#ff0000,#800000)"></div>
+          <div class="mt-1 flex justify-between text-xs text-slate-500"><span>Low influence</span><span>High influence</span></div>
+        </div>
+      </div>
+    </section>
+
+    <p class="mt-8 text-center text-xs text-slate-400">
+      Educational project. Not a substitute for medical advice.
+    </p>
+  </main>
+
+  <script>
+    // --- Settings ---------------------------------------------------------
+    const LOW_CONFIDENCE_THRESHOLD = 0.6;   // below this, show a warning
+
+    // --- Elements ---------------------------------------------------------
+    const input = document.getElementById("file-input");
+    const dropzone = document.getElementById("dropzone");
+    const preview = document.getElementById("preview");
+    const placeholder = document.getElementById("placeholder");
+    const analyzeBtn = document.getElementById("analyze-btn");
+    const errorBox = document.getElementById("error");
+    const results = document.getElementById("results");
+    const topLabel = document.getElementById("top-label");
+    const topConfidence = document.getElementById("top-confidence");
+    const lowConfidence = document.getElementById("low-confidence");
+    const bars = document.getElementById("bars");
+    const gradcam = document.getElementById("gradcam");
+    const camOriginal = document.getElementById("cam-original");
+    const camBase = document.getElementById("cam-base");
+    const camOverlay = document.getElementById("cam-overlay");
+    const camOpacity = document.getElementById("cam-opacity");
+    const camTitle = document.getElementById("cam-title");
+
+    let selectedFile = null;
+
+    // --- Helpers ----------------------------------------------------------
+    function showError(message) {
+      errorBox.textContent = message;
+      errorBox.classList.remove("hidden");
+    }
+
+    function hideError() {
+      errorBox.classList.add("hidden");
+    }
+
+    function setFile(file) {
+      if (!file || !file.type.startsWith("image/")) {
+        showError("Please choose an image file.");
+        return;
+      }
+      selectedFile = file;
+      preview.src = URL.createObjectURL(file);
+      preview.classList.remove("hidden");
+      placeholder.classList.add("hidden");
+      analyzeBtn.disabled = false;
+      results.classList.add("hidden");
+      hideError();
+    }
+
+    // Highlight the chosen class and show its Grad-CAM
+    function selectClass(result) {
+      bars.querySelectorAll("button").forEach((b) => {
+        b.classList.toggle("ring-2", b.dataset.label === result.label);
+      });
+      if (result.heatmap) {
+        camTitle.textContent = `Grad-CAM : ${result.label}`;
+        camOriginal.src = preview.src;
+        camBase.src = preview.src;
+        camOverlay.src = result.heatmap;
+        gradcam.classList.remove("hidden");
+      } else {
+        gradcam.classList.add("hidden");
+      }
+    }
+
+    function renderResults(data) {
+      topLabel.textContent = data.prediction;
+      topConfidence.textContent = `Confidence: ${(data.confidence * 100).toFixed(1)} %`;
+      lowConfidence.classList.toggle("hidden", data.confidence >= LOW_CONFIDENCE_THRESHOLD);
+
+      bars.innerHTML = "";
+      data.results.forEach((r, i) => {
+        const pct = (r.probability * 100).toFixed(1);
+        const li = document.createElement("li");
+
+        // Each bar is a button: clicking it shows the Grad-CAM of that class
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.dataset.label = r.label;
+        btn.className = "w-full rounded-lg p-2 text-left ring-indigo-500 transition hover:bg-slate-50";
+        btn.addEventListener("click", () => selectClass(r));
+
+        const row = document.createElement("div");
+        row.className = "mb-1 flex justify-between text-sm";
+        const name = document.createElement("span");
+        name.textContent = r.label;
+        const value = document.createElement("span");
+        value.className = "text-slate-500";
+        value.textContent = `${pct} %`;
+        row.append(name, value);
+
+        const track = document.createElement("div");
+        track.className = "h-2 overflow-hidden rounded-full bg-slate-100";
+        const fill = document.createElement("div");
+        // Highlight the top prediction
+        fill.className = "h-full rounded-full " + (i === 0 ? "bg-indigo-600" : "bg-slate-300");
+        fill.style.width = `${pct}%`;
+        track.append(fill);
+
+        btn.append(row, track);
+        li.append(btn);
+        bars.append(li);
+      });
+
+      results.classList.remove("hidden");
+      selectClass(data.results[0]);   // show the predicted class first
+    }
+
+    // --- Events -----------------------------------------------------------
+    camOpacity.addEventListener("input", () => {
+      camOverlay.style.opacity = camOpacity.value / 100;
+    });
+
+    input.addEventListener("change", (e) => setFile(e.target.files[0]));
+
+    ["dragenter", "dragover"].forEach((evt) =>
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.classList.add("border-indigo-500", "bg-indigo-50");
+      })
+    );
+
+    ["dragleave", "drop"].forEach((evt) =>
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("border-indigo-500", "bg-indigo-50");
+      })
+    );
+
+    dropzone.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
+    analyzeBtn.addEventListener("click", async () => {
+      if (!selectedFile) return;
+
+      analyzeBtn.disabled = true;
+      analyzeBtn.textContent = "Analyzing…";
+      hideError();
+
+      const formData = new FormData();
+      formData.append("image", selectedFile);
+
+      try {
+        const res = await fetch("/predict", { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Server error.");
+        renderResults(data);
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = "Analyze";
+      }
+    });
+  </script>
+</body>
+</html>
